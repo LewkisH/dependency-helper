@@ -41,13 +41,15 @@ Array of grouped analysis results showing the trigger field, current value, and 
 
 ```typescript
 interface GroupedAnalysisResult {
-  triggerField?: string;        // The field that triggered the dependency
-  triggerValue?: any;           // Current value of the trigger field
+  triggerField?: string;        // The field that triggered the dependency (only for type="dependency")
+  triggerValue?: any;           // Current value of the trigger field (only for type="dependency")
   triggerFieldLabel?: string;   // Human-readable label for the trigger field
   errorField: string;           // The field with the validation error
   errorFieldLabel?: string;     // Human-readable label for the error field
+  errorFieldCurrentValue?: any; // Current value of the error field
   suggestions: Suggestion[];    // Array of fields to fix
-  type: "dependency" | "simple" // Type of error
+  type: "dependency" | "simple" // "dependency" = forward (what to change given trigger)
+                                // "simple" = reverse (alternative trigger values)
 }
 
 interface Suggestion {
@@ -61,6 +63,12 @@ interface Suggestion {
 
 ### Example Output
 
+The system returns **two separate result objects** for bidirectional dependencies:
+
+**1. Forward Dependency (type="dependency"):** Shows what dependent fields need to change given the current trigger value.
+
+**2. Reverse Dependency (type="simple"):** Shows alternative trigger values that would make the current error value valid.
+
 ```json
 [
   {
@@ -69,6 +77,7 @@ interface Suggestion {
     "triggerFieldLabel": "Class Segment (select one)",
     "errorField": "customer.classSegment",
     "errorFieldLabel": "Class Segment (select one)",
+    "errorFieldCurrentValue": "Associations",
     "suggestions": [
       {
         "field": "customer.classDescription",
@@ -83,9 +92,42 @@ interface Suggestion {
       }
     ],
     "type": "dependency"
+  },
+  {
+    "errorField": "customer.classDescription",
+    "errorFieldLabel": "Class Description (select one)",
+    "errorFieldCurrentValue": "Printing",
+    "suggestions": [
+      {
+        "field": "customer.classSegment",
+        "currentValue": "Associations",
+        "allowedValues": ["Business Services"],
+        "isRequired": true,
+        "title": "Class Segment (select one)"
+      }
+    ],
+    "type": "simple"
   }
 ]
 ```
+
+### Understanding Result Types: "dependency" vs "simple"
+
+The `type` field indicates the direction of dependency analysis:
+
+- **`type: "dependency"`** (Forward Dependency)
+  - Has `triggerField` and `triggerValue` populated
+  - Shows what dependent fields need to change given the current trigger value
+  - Answers: "Given my current choice in field A, what must field B be?"
+  - Example: classSegment="Associations" → classDescription must be one of ["Clubs", "Labor Union", ...]
+
+- **`type: "simple"`** (Reverse Dependency)
+  - Does NOT have `triggerField` or `triggerValue`
+  - Shows alternative trigger values that would make the current error value valid
+  - Answers: "What could I change field A to, so that my current value in field B becomes valid?"
+  - Example: classDescription="Printing" (currently invalid) → classSegment could be "Business Services"
+
+**Key Insight:** For bidirectional dependencies, the system returns **two separate result objects** - one for forward dependencies and one for reverse dependencies. This allows the UI to present both "fix the dependent field" and "change the trigger field" as distinct options to the user.
 
 ### Why `triggerField` and `errorField` Are Separate
 
@@ -147,6 +189,21 @@ Cascading Dependency (triggerField ≠ errorField):
 
 ## How It Works
 
+### 0. **Schema Validation**
+
+Before processing any errors, the system validates that the schema is properly dereferenced:
+
+**Function:** `hasRefs(schema)`
+
+- Uses JSON.stringify and regex to detect any `$ref` references in the schema
+- If `$ref` references are found:
+  - Logs a warning with the count of references
+  - Aborts analysis and returns an empty array
+  - Instructs users to dereference the schema before use
+- This prevents incorrect results from unresolved references
+
+**Why this matters:** The tool relies on navigating the full schema structure. `$ref` references must be resolved (dereferenced) beforehand, or the navigation will fail to find dependency definitions.
+
 ### 1. **Error Detection & Parsing**
 
 The system receives validation errors from RJSF with schema paths like:
@@ -187,13 +244,24 @@ Navigates through nested schema structures to find the schema definition for a g
 
 **Function:** `findAllRequiredFields()`
 
-Recursively explores dependency chains:
+Recursively explores forward dependency chains:
 
 1. **Identify active dependencies**: Check which dependencies are triggered based on current form values
 2. **Match oneOf branches**: Find which `oneOf` schema branch matches the current trigger value
 3. **Extract requirements**: Collect all required fields and enum constraints from the matched branch
 4. **Recurse for nested dependencies**: Check if any required fields themselves trigger more dependencies
 5. **Avoid infinite loops**: Use a `visited` set to track already-processed dependency chains
+
+**Function:** `findReverseDependencies()`
+
+Finds alternative trigger values that would make the current error value valid:
+
+1. **Get dependency schema**: Navigate to the schema containing the dependency definition
+2. **Iterate through oneOf branches**: Check each possible schema branch
+3. **Match error value**: Find branches where the error value is in the allowed enum values
+4. **Extract trigger values**: Get the corresponding trigger field enum values from matching branches
+5. **Filter current value**: Exclude the current trigger value (since it's already invalid)
+6. **Return alternatives**: Return array of valid trigger values that would make the error value valid
 
 ### 5. **Validation & Filtering**
 
@@ -214,24 +282,34 @@ Handles complex nested structures:
 - **Array item properties**: Check required fields for each array item
 - **Type validation**: Ensure values match expected types (string, number, boolean)
 
-## Current Limitations
+## Current Capabilities
 
-### ⚠️ Parent Dependency Analysis Only
+### ✅ Bidirectional Dependency Analysis
 
-**Current behavior:** The system only analyzes "forward dependencies" - what fields are required given the current trigger value.
+**Implemented Features:**
 
-**Example:**
-- `classSegment = "Associations"` → Shows what values `classDescription` must have
-- ❌ Does NOT show: If user changes `classDescription`, what values could `classSegment` be changed to?
+1. **Forward Dependencies (type="dependency")**
+   - Analyzes what dependent fields need to change given the current trigger value
+   - Example: `classSegment = "Associations"` → Shows allowed values for `classDescription`
+   - Provides `triggerField` and `triggerValue` context
 
-**What's missing:**
-- **Reverse dependency lookup**: Given an error on a child field, suggest valid trigger values
-- **Alternative paths**: Show multiple valid combinations of trigger + dependent fields
-- **Optimal path finding**: Suggest the minimal set of changes to resolve all errors
+2. **Reverse Dependencies (type="simple")**
+   - Finds alternative trigger values that would make the current error value valid
+   - Example: `classDescription = "Printing"` (invalid) → Suggests changing `classSegment` to "Business Services"
+   - Does NOT include `triggerField`/`triggerValue` (since we're suggesting changing the trigger)
 
-### Example of Missing Functionality
+3. **Deduplication**
+   - Handles JSON Schema `oneOf` structures that generate multiple errors per field
+   - Returns one result per `errorField:type` combination
 
-Given this error:
+4. **Self-reference Filtering**
+   - Suggestions never reference the error field itself
+   - Only suggests changes to OTHER fields
+   - Example: Error on `classDescription` won't suggest changing `classDescription`
+
+### Real-World Example
+
+Given this validation error:
 ```json
 {
   "fieldPath": "customer.classDescription",
@@ -240,28 +318,36 @@ Given this error:
 }
 ```
 
-**Current output:**
-- ✅ Shows allowed values for `classDescription` given current `classSegment`
-- ❌ Does NOT suggest changing `classSegment` to a value that would make "Printing" valid
+**Current output includes BOTH:**
 
-**Desired output:**
+**Option 1 - Forward dependency (fix dependent field):**
 ```json
 {
-  "errorField": "customer.classDescription",
-  "currentValue": "Printing",
+  "triggerField": "customer.classSegment",
+  "triggerValue": "Associations",
+  "errorField": "customer.classSegment",
   "suggestions": [
     {
       "field": "customer.classDescription",
-      "allowedValues": ["Legal Office", "Medical Office"],
-      "isRequired": true
-    },
+      "allowedValues": ["Clubs - civic, service or social", "Labor Union Offices", ...]
+    }
+  ],
+  "type": "dependency"
+}
+```
+
+**Option 2 - Reverse dependency (change trigger field):**
+```json
+{
+  "errorField": "customer.classDescription",
+  "suggestions": [
     {
       "field": "customer.classSegment",
       "currentValue": "Associations",
-      "allowedValues": ["Contractors", "Manufacturing"],
-      "note": "Alternative: Change classSegment to make current classDescription valid"
+      "allowedValues": ["Business Services"]
     }
-  ]
+  ],
+  "type": "simple"
 }
 ```
 
@@ -386,7 +472,7 @@ npx ts-node test-script.ts
 
 ## Key Algorithms
 
-### Dependency Resolution Algorithm
+### Forward Dependency Resolution Algorithm
 
 ```
 For each validation error:
@@ -397,8 +483,27 @@ For each validation error:
   5. Navigate to schema definition for that parent
   6. Find matching oneOf branch for current trigger value
   7. Recursively collect all required fields and constraints
-  8. Filter suggestions to only include fields in flattened schema
-  9. Group results by trigger field
+  8. Filter suggestions to exclude the error field itself
+  9. Filter suggestions to only include fields in flattened schema
+  10. Return as type="dependency" result
+```
+
+### Reverse Dependency Resolution Algorithm
+
+```
+For each validation error on a dependent field:
+  1. Extract field path and current (invalid) value
+  2. Identify dependency trigger field from schema path
+  3. Navigate to parent schema with dependency definition
+  4. Iterate through all oneOf branches:
+     a. Check if error value is in the branch's enum for error field
+     b. If yes, extract trigger field's enum values from that branch
+     c. Collect all matching trigger values
+  5. Filter out current trigger value (already invalid)
+  6. If alternative trigger values exist:
+     a. Create suggestion with trigger field and alternative values
+     b. Return as type="simple" result (no triggerField/triggerValue)
+  7. Return null if no alternatives found
 ```
 
 ### Schema Navigation Algorithm
@@ -415,47 +520,89 @@ Given: schema object, field path (e.g., "customer.address.city")
 4. Return final schema definition or null
 ```
 
-## Future Enhancements
+## Future Enhancement Ideas
 
-### 1. ~~Field Labels for Display~~
+### Completed Features
+
+#### Field Labels and Current Values
 **Status**: ✅ **Implemented**
 
-The system now includes `triggerFieldLabel` and `errorFieldLabel` in the output, providing human-readable field titles extracted from the flattened schema.
+The system now includes human-readable labels and current values for all fields in the output:
+
+- `triggerFieldLabel` and `errorFieldLabel`: Human-readable field titles extracted from the flattened schema
+- `errorFieldCurrentValue`: The current (invalid) value of the error field for both dependency and simple types
 
 **Implementation:**
 - `getFieldLabel(fieldPath, ffSchema)` function navigates the schema to extract the `title` property
 - Falls back to the field path if no title is defined
 - Handles nested objects and array indices properly
 - Labels are populated for both dependency and simple error types
+- `errorFieldCurrentValue` is extracted from the `AnalysisResult.currentValue` and included in both result types
 
 **Example:**
 ```typescript
 {
   "triggerFieldLabel": "Class Segment (select one)",  // Instead of "customer.classSegment"
-  "errorFieldLabel": "Class Description (select one)"  // Instead of "customer.classDescription"
+  "errorFieldLabel": "Class Description (select one)",  // Instead of "customer.classDescription"
+  "errorFieldCurrentValue": "Printing"  // The current invalid value
 }
 ```
 
-### 2. Reverse Dependency Analysis
-**Status**: ⚠️ **TODO - High Priority**
-- Given an error on a dependent field, suggest valid trigger values
-- Show all possible paths to make current value valid
+#### Schema Reference Validation
+**Status**: ✅ **Implemented**
 
-### 3. Multi-field Optimization
-- Suggest minimal changes to fix all errors
-- Prioritize changes that fix the most errors
+The system validates that the input schema is fully dereferenced before processing:
 
-### 4. Cascading Dependency Visualization
-- Show full dependency tree
-- Highlight active branches
+**Implementation:**
+- `hasRefs(schema)` function uses JSON.stringify + regex to detect `$ref` references
+- Fast O(n) string search instead of recursive object traversal
+- If `$ref` found, logs warning with count and aborts analysis
+- Returns empty array to prevent incorrect results from unresolved references
+- Validates on every call to `analyzeValidationErrors()`
 
-### 5. Smart Suggestions
-- Learn from user behavior
-- Suggest most commonly used combinations
+**Why it matters:** The tool cannot navigate through `$ref` references. Schemas must be dereferenced (e.g., using `@apidevtools/json-schema-ref-parser`) before use.
 
-### 6. Validation Preview
-- Show what would happen if a field is changed
-- Preview new validation state before committing
+#### Reverse Dependency Analysis
+**Status**: ✅ **Implemented**
+
+The system now analyzes bidirectional dependencies and returns separate result objects:
+
+**Implementation:**
+- `findReverseDependencies()` function searches all `oneOf` branches to find alternative trigger values
+- `analyzeDependencyError()` returns array with both forward (type="dependency") and reverse (type="simple") results
+- Self-reference filtering ensures suggestions only include OTHER fields
+- Deduplication handles JSON Schema `oneOf` multiple error generation
+- Current value filtering excludes already-invalid trigger values from suggestions
+
+**Example:**
+```typescript
+// Forward dependency
+{
+  "triggerField": "customer.classSegment",
+  "triggerValue": "Associations",
+  "errorField": "customer.classSegment",
+  "suggestions": [{"field": "customer.classDescription", ...}],
+  "type": "dependency"
+}
+
+// Reverse dependency
+{
+  "errorField": "customer.classDescription",
+  "suggestions": [{"field": "customer.classSegment", "allowedValues": ["Business Services"]}],
+  "type": "simple"
+}
+```
+
+### Potential Future Improvements
+
+Some potential areas for improvement:
+
+- **Multi-field optimization**: Analyze all errors together and suggest the minimal set of changes to resolve everything at once
+- **Dependency tree visualization**: Display the full cascade of dependencies to help users understand complex relationships
+- **Smart suggestions**: Track commonly used field combinations to provide context-aware recommendations
+- **Validation preview**: Show what the validation state would be after applying a suggested change
+- **Performance optimization**: Cache schema lookups and dependency resolutions for large schemas
+- **Enhanced error context**: Include more semantic information about why a dependency constraint exists
 
 ## Dependencies
 
@@ -508,13 +655,16 @@ The `test-script.ts` file:
 
 ## Contributing
 
-When extending this codebase:
+## Extending the Codebase
 
-1. **Add reverse dependency lookup**: Implement algorithm to find valid trigger values for a given dependent field value
-2. **Improve schema navigation**: Handle more edge cases (conditional schemas, $ref references)
-3. **Add caching**: Cache schema lookups and dependency resolutions
-4. **Enhance error messages**: Provide more context about why a suggestion is being made
-5. **Add validation**: Verify suggestions would actually resolve the error
+When extending this codebase, consider these areas:
+
+- **Schema navigation improvements**: Handle more edge cases like conditional schemas, $ref references (after dereferencing), allOf/anyOf patterns
+- **Performance optimizations**: Add caching for schema lookups and dependency resolutions when working with large schemas
+- **Error message enhancements**: Provide more semantic context about why specific suggestions are made
+- **Validation verification**: Verify that suggestions would actually resolve the error before returning them
+- **Circular dependency detection**: Add safeguards to detect and handle circular dependency chains gracefully
+- **Complex oneOf support**: Improve handling of deeply nested or complex oneOf structures
 
 ## Notes for AI Agents
 
@@ -536,3 +686,15 @@ When extending this codebase:
   - Navigate to field using `getSchemaForPath()` with the field path
   - Extract the `title` property for display purposes
   - Fallback to the field path if no title is defined
+- **Result types**:
+  - `type: "dependency"` = Forward dependency with `triggerField`/`triggerValue` showing what dependent fields need
+  - `type: "simple"` = Reverse dependency without `triggerField`/`triggerValue` showing alternative trigger values
+- **Bidirectional results**: For each dependency error pair, return TWO separate objects:
+  1. Forward dependency (what to change given current trigger)
+  2. Reverse dependency (what trigger values would make current value valid)
+- **Deduplication**: JSON Schema `oneOf` generates N errors for N branches, deduplicate by `${errorField}:${type}`
+- **Self-reference filtering**: Never suggest changing the error field itself - only suggest OTHER fields
+  - Filter: `suggestions.filter(s => s.field !== fieldPath)`
+  - This ensures forward dependencies suggest changing dependent fields, not the trigger
+- **Current value filtering**: In reverse dependencies, exclude current trigger value from alternatives
+  - It's already invalid, so no point suggesting it again

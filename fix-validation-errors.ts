@@ -538,15 +538,21 @@ function analyzeDependencyError(
                 branchDepValue.enum.includes(triggerValue)
               ) {
                 // This is the active branch! Check what it requires
-                const suggestions: Suggestion[] = [];
+                const forwardSuggestions: Suggestion[] = [];
+                const results: AnalysisResult[] = [];
 
-                // Add the constraint from this specific field
+                const triggerFieldPath = testPath
+                  ? `${testPath}.${depKey}`
+                  : depKey;
+
+                // For array constraints, we should suggest adding items to the array
+                // NOT suggest changing the array itself
                 const limit = error.originalError.params?.limit;
-                if (limit !== undefined) {
+                if (limit !== undefined && Array.isArray(currentValue)) {
                   if (fieldExistsInSchema(fieldPath, ffSchema as RJSFSchema)) {
-                    suggestions.push({
+                    forwardSuggestions.push({
                       field: fieldPath,
-                      currentValue: formatValue(currentValue),
+                      currentValue: `array with ${currentValue.length} items`,
                       allowedValues: [`at least ${limit} items`],
                       isRequired: true,
                       title:
@@ -574,21 +580,109 @@ function analyzeDependencyError(
                       propSchema,
                       propPath,
                       propValue,
-                      suggestions
+                      forwardSuggestions
                     );
                   }
                 }
 
-                if (suggestions.length > 0) {
-                  return [
-                    {
-                      triggerField: testPath ? `${testPath}.${depKey}` : depKey,
-                      triggerValue: triggerValue,
-                      errorField: fieldPath,
-                      currentValue: currentValue,
-                      suggestions: suggestions,
-                    },
-                  ];
+                // Filter out self-referential suggestions
+                const otherFieldSuggestions = forwardSuggestions.filter(
+                  (s) => s.field !== fieldPath
+                );
+
+                // Add forward dependency result (what needs to change given current trigger)
+                if (otherFieldSuggestions.length > 0) {
+                  results.push({
+                    triggerField: triggerFieldPath,
+                    triggerValue: triggerValue,
+                    errorField: fieldPath,
+                    currentValue: currentValue,
+                    suggestions: otherFieldSuggestions,
+                  });
+                }
+
+                // Add reverse dependency result (what trigger values would make this valid)
+                // For array constraints, suggest alternative trigger values that don't require this field
+                const reverseSuggestions: Suggestion[] = [];
+
+                // Look through all oneOf branches to find alternatives
+                for (const altBranch of typedDepRules.oneOf) {
+                  const altBranchDepValue = altBranch.properties?.[depKey];
+
+                  if (altBranchDepValue?.enum) {
+                    // Check if this branch doesn't have the same strict requirements on this field
+                    // or doesn't require this field at all
+                    let branchAllowsCurrentValue = false;
+
+                    // Navigate to the error field in this branch to check its constraints
+                    const errorFieldName = fieldPath.replace(
+                      testPath + ".",
+                      ""
+                    );
+                    const errorFieldParts = errorFieldName.split(".");
+
+                    let branchSchema: any = altBranch.properties;
+                    for (const part of errorFieldParts) {
+                      if (branchSchema?.[part]) {
+                        branchSchema = branchSchema[part];
+                      } else if (branchSchema?.properties?.[part]) {
+                        branchSchema = branchSchema.properties[part];
+                      } else {
+                        branchSchema = null;
+                        break;
+                      }
+                    }
+
+                    // If this branch doesn't have minItems constraint, or has a lower one, it's an alternative
+                    if (
+                      !branchSchema ||
+                      !(branchSchema as any).minItems ||
+                      (branchSchema as any).minItems <=
+                        (Array.isArray(currentValue) ? currentValue.length : 0)
+                    ) {
+                      branchAllowsCurrentValue = true;
+                    }
+
+                    // Add trigger values from branches that would allow the current array state
+                    if (branchAllowsCurrentValue) {
+                      for (const altTriggerValue of altBranchDepValue.enum) {
+                        if (altTriggerValue !== triggerValue) {
+                          reverseSuggestions.push({
+                            field: triggerFieldPath,
+                            currentValue: String(triggerValue),
+                            allowedValues: [altTriggerValue],
+                            isRequired: true,
+                            title: getFieldLabel(triggerFieldPath, ffSchema),
+                          });
+                        }
+                      }
+                    }
+                  }
+                }
+
+                if (reverseSuggestions.length > 0) {
+                  // Consolidate reverse suggestions
+                  const consolidatedAllowedValues = Array.from(
+                    new Set(reverseSuggestions.flatMap((s) => s.allowedValues))
+                  );
+
+                  results.push({
+                    errorField: fieldPath,
+                    currentValue: currentValue,
+                    suggestions: [
+                      {
+                        field: triggerFieldPath,
+                        currentValue: String(triggerValue),
+                        allowedValues: consolidatedAllowedValues,
+                        isRequired: true,
+                        title: getFieldLabel(triggerFieldPath, ffSchema),
+                      },
+                    ],
+                  });
+                }
+
+                if (results.length > 0) {
+                  return results;
                 }
               }
             }
@@ -834,9 +928,20 @@ export interface GroupedAnalysisResult {
   triggerFieldLabel?: string;
   errorField: string;
   errorFieldLabel?: string;
+  errorFieldCurrentValue?: any; // Current value of the error field
   suggestions: Suggestion[];
   alternatives?: AlternativeTrigger[]; // Alternative ways to fix by changing trigger field
-  type: "dependency" | "simple";  // "dependency" = forward dependency (has triggerField), "simple" = reverse dependency (no triggerField)
+  type: "dependency" | "simple"; // "dependency" = forward dependency (has triggerField), "simple" = reverse dependency (no triggerField)
+}
+
+/**
+ * Checks if a schema contains any $ref references
+ */
+function hasRefs(obj: any): boolean {
+  const jsonString = JSON.stringify(obj);
+  const refPattern = /"\$ref"\s*:\s*"/g;
+  const matches = jsonString.match(refPattern);
+  return matches !== null && matches.length > 0;
 }
 
 /**
@@ -852,6 +957,20 @@ export function analyzeValidationErrors(
   ffSchema: RJSFSchema,
   schema: Schema
 ): GroupedAnalysisResult[] {
+  // Check for $ref references in the schema
+  if (hasRefs(schema)) {
+    const refCount = (JSON.stringify(schema).match(/"\$ref"\s*:\s*"/g) || [])
+      .length;
+    console.warn("\n⚠️  SCHEMA ERROR: This schema contains $ref references!");
+    console.warn(`   Found ${refCount} $ref reference(s) in the schema`);
+    console.warn(
+      "   The analysis tool is NOT designed to handle schemas with $ref."
+    );
+    console.warn("   Please dereference the schema before using it.");
+    console.warn("   Aborting analysis.\n");
+    return [];
+  }
+
   const results: AnalysisResult[] = [];
 
   // Analyze each validation error
@@ -886,7 +1005,7 @@ export function analyzeValidationErrors(
   // Convert each AnalysisResult to GroupedAnalysisResult
   const groupedResults: GroupedAnalysisResult[] = [];
 
-  for (const result of deduped.values()) {
+  for (const result of Array.from(deduped.values())) {
     groupedResults.push({
       triggerField: result.triggerField,
       triggerValue: result.triggerValue,
@@ -895,6 +1014,7 @@ export function analyzeValidationErrors(
         : undefined,
       errorField: result.errorField,
       errorFieldLabel: getFieldLabel(result.errorField, ffSchema),
+      errorFieldCurrentValue: result.currentValue, // Include for both dependency and simple types
       suggestions: result.suggestions,
       type: result.triggerField ? "dependency" : "simple",
     });
