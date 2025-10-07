@@ -43,9 +43,9 @@ Array of grouped analysis results showing the trigger field, current value, and 
 interface GroupedAnalysisResult {
   triggerField?: string;        // The field that triggered the dependency
   triggerValue?: any;           // Current value of the trigger field
-  triggerFieldLabel?: string;   // Human-readable label for the trigger field (TODO: needs implementation)
+  triggerFieldLabel?: string;   // Human-readable label for the trigger field
   errorField: string;           // The field with the validation error
-  errorFieldLabel?: string;     // Human-readable label for the error field (TODO: needs implementation)
+  errorFieldLabel?: string;     // Human-readable label for the error field
   suggestions: Suggestion[];    // Array of fields to fix
   type: "dependency" | "simple" // Type of error
 }
@@ -66,7 +66,9 @@ interface Suggestion {
   {
     "triggerField": "customer.classSegment",
     "triggerValue": "Associations",
+    "triggerFieldLabel": "Class Segment (select one)",
     "errorField": "customer.classSegment",
+    "errorFieldLabel": "Class Segment (select one)",
     "suggestions": [
       {
         "field": "customer.classDescription",
@@ -93,8 +95,10 @@ The `triggerField` and `errorField` serve different purposes and can be differen
 ```json
 {
   "triggerField": "customer.classSegment",
-  "triggerValue": "Associations", 
-  "errorField": "customer.classSegment"
+  "triggerValue": "Associations",
+  "triggerFieldLabel": "Class Segment (select one)",
+  "errorField": "customer.classSegment",
+  "errorFieldLabel": "Class Segment (select one)"
 }
 ```
 - **Scenario**: User sets `classSegment = "Associations"`, which triggers a dependency requiring `classDescription` to be one of specific values
@@ -106,7 +110,9 @@ The `triggerField` and `errorField` serve different purposes and can be differen
 {
   "triggerField": "objects.insuredItem.0.products.bpp.include",
   "triggerValue": "Yes",
-  "errorField": "objects.insuredItem.0.products.bpp.financials.insurers"
+  "triggerFieldLabel": "Include BPP",
+  "errorField": "objects.insuredItem.0.products.bpp.financials.insurers",
+  "errorFieldLabel": "Insurers"
 }
 ```
 - **Scenario**: User sets `include = "Yes"` at the product level, which triggers a nested dependency requiring `financials.insurers` array to have at least N items
@@ -411,38 +417,27 @@ Given: schema object, field path (e.g., "customer.address.city")
 
 ## Future Enhancements
 
-### 1. Field Labels for Display
-**Status**: ⚠️ **TODO - High Priority**
+### 1. ~~Field Labels for Display~~
+**Status**: ✅ **Implemented**
 
-Currently missing `triggerFieldLabel` and `errorFieldLabel` in the output, which are needed for user-friendly UI display.
+The system now includes `triggerFieldLabel` and `errorFieldLabel` in the output, providing human-readable field titles extracted from the flattened schema.
 
-**Implementation approach:**
+**Implementation:**
+- `getFieldLabel(fieldPath, ffSchema)` function navigates the schema to extract the `title` property
+- Falls back to the field path if no title is defined
+- Handles nested objects and array indices properly
+- Labels are populated for both dependency and simple error types
+
+**Example:**
 ```typescript
-function getFieldLabel(fieldPath: string, ffSchema: RJSFSchema): string | undefined {
-  const schema = getSchemaForPath(ffSchema, fieldPath);
-  return schema?.title || fieldPath; // Fallback to path if no title
+{
+  "triggerFieldLabel": "Class Segment (select one)",  // Instead of "customer.classSegment"
+  "errorFieldLabel": "Class Description (select one)"  // Instead of "customer.classDescription"
 }
 ```
 
-Then in `analyzeValidationErrors()`:
-```typescript
-groupedResults.push({
-  triggerField: firstAnalysis.triggerField,
-  triggerValue: firstAnalysis.triggerValue,
-  triggerFieldLabel: getFieldLabel(firstAnalysis.triggerField, ffSchema),
-  errorField: firstAnalysis.errorField,
-  errorFieldLabel: getFieldLabel(firstAnalysis.errorField, ffSchema),
-  suggestions: allSuggestions,
-  type: "dependency",
-});
-```
-
-**Why this matters:**
-- Users see "Class Segment" instead of "customer.classSegment"
-- Improves UI/UX when displaying validation error explanations
-- Makes error messages more accessible to non-technical users
-
 ### 2. Reverse Dependency Analysis
+**Status**: ⚠️ **TODO - High Priority**
 - Given an error on a dependent field, suggest valid trigger values
 - Show all possible paths to make current value valid
 

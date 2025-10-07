@@ -51,6 +51,14 @@ interface Suggestion {
   title?: string;
 }
 
+interface AlternativeTrigger {
+  field: string; // The trigger field to change
+  currentValue: any; // Current value of trigger field
+  alternativeValues: any[]; // Valid trigger values that would make the error field valid
+  title?: string; // Human-readable field title
+  note: string; // Explanation of this alternative
+}
+
 interface AnalysisResult {
   triggerField?: string;
   triggerValue?: any;
@@ -292,6 +300,85 @@ function checkNestedRequiredFields(
 }
 
 /**
+ * Find alternative trigger values that would make the current error field value valid
+ * This performs "reverse dependency lookup" - given an invalid dependent field value,
+ * find what trigger values would make it valid.
+ * 
+ * Returns Suggestion[] instead of AlternativeTrigger[] to match the output format.
+ */
+function findReverseDependencies(
+  ffSchema: RJSFSchema,
+  errorFieldPath: string,
+  errorFieldValue: any,
+  parentSchema: any,
+  parentPath: string | null,
+  parentData: any
+): Suggestion[] {
+  const alternatives: Suggestion[] = [];
+
+  if (!parentSchema?.dependencies) {
+    return alternatives;
+  }
+
+  // Extract the field name from the full path (last part)
+  const errorFieldName = errorFieldPath.split('.').pop();
+  if (!errorFieldName) return alternatives;
+
+  // Iterate through all dependencies to find ones that affect this error field
+  for (const [depFieldName, depRule] of Object.entries(parentSchema.dependencies) as [string, any][]) {
+    if (!depRule.oneOf) continue;
+    
+    // Skip if this is the same field as the error field (no self-referencing)
+    if (depFieldName === errorFieldName) continue;
+
+    // Check each oneOf branch to see if any would make the error field value valid
+    const validTriggerValues: any[] = [];
+
+    for (const branch of depRule.oneOf) {
+      const branchProperties = branch.properties || {};
+      
+      // Check if this branch has the error field
+      if (branchProperties[errorFieldName]) {
+        const fieldSchema = branchProperties[errorFieldName];
+        
+        // Check if the current error value would be valid in this branch
+        if (fieldSchema.enum && fieldSchema.enum.includes(errorFieldValue)) {
+          // This branch would make the value valid! Get the trigger value for this branch
+          const triggerSchema = branchProperties[depFieldName];
+          if (triggerSchema?.enum && triggerSchema.enum.length > 0) {
+            validTriggerValues.push(...triggerSchema.enum);
+          }
+        }
+      }
+    }
+
+    // If we found alternative trigger values, add them to results
+    if (validTriggerValues.length > 0) {
+      const triggerFieldPath = parentPath ? `${parentPath}.${depFieldName}` : depFieldName;
+      
+      // Get the actual current value of the trigger field
+      const currentTriggerValue = parentData?.[depFieldName];
+      
+      // Only add if:
+      // 1. The trigger field exists in the schema
+      // 2. The current value is NOT already in the valid trigger values (no point suggesting current value)
+      if (fieldExistsInSchema(triggerFieldPath, ffSchema) && 
+          !validTriggerValues.includes(currentTriggerValue)) {
+        alternatives.push({
+          field: triggerFieldPath,
+          currentValue: String(currentTriggerValue),
+          allowedValues: validTriggerValues,
+          isRequired: true,
+          title: getFieldLabel(triggerFieldPath, ffSchema)
+        });
+      }
+    }
+  }
+
+  return alternatives;
+}
+
+/**
  * Find all cascading dependencies for a given object and its current values
  * This recursively explores all dependency chains
  */
@@ -400,13 +487,14 @@ function findAllRequiredFields(ffSchema: RJSFSchema, parentSchema: any, parentDa
 
 /**
  * Analyze dependency-based errors with full cascade support
+ * Returns an array of results - one for forward dependencies and optionally one for reverse
  */
 function analyzeDependencyError(
   error: MappedError,
   formData: FormData,
   schema: Schema,
   ffSchema: RJSFSchema
-): AnalysisResult | null {
+): AnalysisResult[] {
   const fieldPath = error.fieldPath;
   const schemaPath = error.originalError.schemaPath || "";
 
@@ -428,10 +516,14 @@ function analyzeDependencyError(
 
       if (testSchema?.dependencies) {
         // Found a parent with dependencies!
-        const parentData = testPath ? getNestedValue(formData, testPath) : formData;
+        const parentData = testPath
+          ? getNestedValue(formData, testPath)
+          : formData;
 
         // Check each dependency to see if it has required fields
-        for (const [depKey, depRules] of Object.entries(testSchema.dependencies)) {
+        for (const [depKey, depRules] of Object.entries(
+          testSchema.dependencies
+        )) {
           const triggerValue = parentData?.[depKey];
           const typedDepRules = depRules as DependencyRule;
 
@@ -441,7 +533,10 @@ function analyzeDependencyError(
               // Check if this branch matches the current trigger value
               const branchDepValue = branch.properties?.[depKey];
 
-              if (branchDepValue?.enum && branchDepValue.enum.includes(triggerValue)) {
+              if (
+                branchDepValue?.enum &&
+                branchDepValue.enum.includes(triggerValue)
+              ) {
                 // This is the active branch! Check what it requires
                 const suggestions: Suggestion[] = [];
 
@@ -454,32 +549,46 @@ function analyzeDependencyError(
                       currentValue: formatValue(currentValue),
                       allowedValues: [`at least ${limit} items`],
                       isRequired: true,
-                      title: error.originalError.stack?.split("'")[1] || undefined,
+                      title:
+                        error.originalError.stack?.split("'")[1] || undefined,
                     });
                   }
                 }
 
                 // Also check for other required fields in this branch that might be missing
                 if (branch.properties) {
-                  for (const [propName, propSchema] of Object.entries(branch.properties)) {
+                  for (const [propName, propSchema] of Object.entries(
+                    branch.properties
+                  )) {
                     if (propName === depKey) continue; // Skip the dependency trigger itself
 
-                    const propPath = testPath ? `${testPath}.${propName}` : propName;
+                    const propPath = testPath
+                      ? `${testPath}.${propName}`
+                      : propName;
                     const propValue = parentData?.[propName];
 
                     // Check nested required fields in this property
-                    checkNestedRequiredFields(ffSchema, propName, propSchema, propPath, propValue, suggestions);
+                    checkNestedRequiredFields(
+                      ffSchema,
+                      propName,
+                      propSchema,
+                      propPath,
+                      propValue,
+                      suggestions
+                    );
                   }
                 }
 
                 if (suggestions.length > 0) {
-                  return {
-                    triggerField: testPath ? `${testPath}.${depKey}` : depKey,
-                    triggerValue: triggerValue,
-                    errorField: fieldPath,
-                    currentValue: currentValue,
-                    suggestions: suggestions,
-                  };
+                  return [
+                    {
+                      triggerField: testPath ? `${testPath}.${depKey}` : depKey,
+                      triggerValue: triggerValue,
+                      errorField: fieldPath,
+                      currentValue: currentValue,
+                      suggestions: suggestions,
+                    },
+                  ];
                 }
               }
             }
@@ -494,7 +603,9 @@ function analyzeDependencyError(
 
   if (dependencyField) {
     const parentPath = getParentPath(fieldPath);
-    const parentData = parentPath ? getNestedValue(formData, parentPath) : formData;
+    const parentData = parentPath
+      ? getNestedValue(formData, parentPath)
+      : formData;
 
     // Get the dependency trigger value - read it from the actual form data
     const triggerValue = parentData ? parentData[dependencyField] : undefined;
@@ -505,7 +616,10 @@ function analyzeDependencyError(
     // Check if parentSchema has the dependency definition
     if (!parentSchema?.dependencies?.[dependencyField]) {
       // If not, we might need to look at properties level
-      if (parentSchema?.properties && parentSchema.properties[dependencyField]) {
+      if (
+        parentSchema?.properties &&
+        parentSchema.properties[dependencyField]
+      ) {
         // This is a product-level schema, look for dependencies
         const productSchema = parentSchema.properties[dependencyField];
         if (productSchema?.dependencies) {
@@ -518,66 +632,145 @@ function analyzeDependencyError(
           );
 
           if (allSuggestions.length > 0) {
-            return {
-              triggerField: parentPath ? `${parentPath}.${dependencyField}` : dependencyField,
-              triggerValue: triggerValue,
-              errorField: fieldPath,
-              currentValue: currentValue,
-              suggestions: allSuggestions,
-            };
+            const results: AnalysisResult[] = [];
+
+            // Filter out suggestions for the error field itself (we want to suggest OTHER fields to change)
+            const otherFieldSuggestions = allSuggestions.filter(
+              (s) => s.field !== fieldPath
+            );
+
+            // Only add forward dependency result if there are suggestions for OTHER fields
+            if (otherFieldSuggestions.length > 0) {
+              results.push({
+                triggerField: parentPath
+                  ? `${parentPath}.${dependencyField}`
+                  : dependencyField,
+                triggerValue: triggerValue,
+                errorField: fieldPath,
+                currentValue: currentValue,
+                suggestions: otherFieldSuggestions,
+              });
+            }
+
+            // Add reverse dependency result if current value is invalid
+            const reverseSuggestions = findReverseDependencies(
+              ffSchema,
+              fieldPath,
+              currentValue,
+              productSchema,
+              parentPath ? `${parentPath}.${dependencyField}` : dependencyField,
+              parentData?.[dependencyField]
+            );
+
+            if (reverseSuggestions.length > 0) {
+              results.push({
+                errorField: fieldPath,
+                currentValue: currentValue,
+                suggestions: reverseSuggestions,
+              });
+            }
+
+            return results;
           }
         }
       }
     } else {
       // Find ALL required fields by exploring the full dependency chain
-      const allSuggestions = findAllRequiredFields(ffSchema, parentSchema, parentData, parentPath);
+      const allSuggestions = findAllRequiredFields(
+        ffSchema,
+        parentSchema,
+        parentData,
+        parentPath
+      );
       console.log("triggerValue", parentPath, dependencyField);
       if (allSuggestions.length > 0) {
-        return {
-          triggerField: parentPath ? `${parentPath}.${dependencyField}` : dependencyField,
-          triggerValue: triggerValue,
-          errorField: fieldPath,
-          currentValue: currentValue,
-          suggestions: allSuggestions,
-        };
+        const results: AnalysisResult[] = [];
+
+        // Filter out suggestions for the error field itself (we want to suggest OTHER fields to change)
+        const otherFieldSuggestions = allSuggestions.filter(
+          (s) => s.field !== fieldPath
+        );
+
+        // Only add forward dependency result if there are suggestions for OTHER fields
+        if (otherFieldSuggestions.length > 0) {
+          results.push({
+            triggerField: parentPath
+              ? `${parentPath}.${dependencyField}`
+              : dependencyField,
+            triggerValue: triggerValue,
+            errorField: fieldPath,
+            currentValue: currentValue,
+            suggestions: otherFieldSuggestions,
+          });
+        }
+
+        // Add reverse dependency result if current value is invalid
+        const reverseSuggestions = findReverseDependencies(
+          ffSchema,
+          fieldPath,
+          currentValue,
+          parentSchema,
+          parentPath,
+          parentData
+        );
+
+        if (reverseSuggestions.length > 0) {
+          results.push({
+            errorField: fieldPath,
+            currentValue: currentValue,
+            suggestions: reverseSuggestions,
+          });
+        }
+
+        return results;
       }
     }
   }
 
   // Handle simple enum errors
   if (error.originalError.params?.allowedValues) {
-    return {
-      errorField: fieldPath,
-      currentValue: currentValue !== undefined ? currentValue : "<not set>",
-      suggestions: [
-        {
-          field: fieldPath,
-          currentValue: currentValue !== undefined ? currentValue : "<not set>",
-          allowedValues: error.originalError.params.allowedValues,
-          isRequired: true,
-        },
-      ],
-    };
+    return [
+      {
+        errorField: fieldPath,
+        currentValue: currentValue !== undefined ? currentValue : "<not set>",
+        suggestions: [
+          {
+            field: fieldPath,
+            currentValue:
+              currentValue !== undefined ? currentValue : "<not set>",
+            allowedValues: error.originalError.params.allowedValues,
+            isRequired: true,
+          },
+        ],
+      },
+    ];
   }
 
   // Handle minItems errors
-  if (error.originalError.params?.limit && error.message.includes("fewer than")) {
+  if (
+    error.originalError.params?.limit &&
+    error.message.includes("fewer than")
+  ) {
     const currentLength = Array.isArray(currentValue) ? currentValue.length : 0;
-    return {
-      errorField: fieldPath,
-      currentValue: `array with ${currentLength} items`,
-      suggestions: [
-        {
-          field: fieldPath,
-          currentValue: `array with ${currentLength} items`,
-          allowedValues: [`at least ${error.originalError.params.limit} items`],
-          isRequired: true,
-        },
-      ],
-    };
+    return [
+      {
+        errorField: fieldPath,
+        currentValue: `array with ${currentLength} items`,
+        suggestions: [
+          {
+            field: fieldPath,
+            currentValue: `array with ${currentLength} items`,
+            allowedValues: [
+              `at least ${error.originalError.params.limit} items`,
+            ],
+            isRequired: true,
+          },
+        ],
+      },
+    ];
   }
 
-  return null;
+  return [];
 }
 
 /**
@@ -597,17 +790,20 @@ function formatValue(value: any): string {
  * Get human-readable label for a field from flattened schema
  * Falls back to field path if no title is found
  */
-function getFieldLabel(fieldPath: string, ffSchema: RJSFSchema): string | undefined {
+function getFieldLabel(
+  fieldPath: string,
+  ffSchema: RJSFSchema
+): string | undefined {
   if (!fieldPath) return undefined;
-  
-  const pathParts = fieldPath.split('.');
+
+  const pathParts = fieldPath.split(".");
   let currentSchema: any = ffSchema;
 
   for (const part of pathParts) {
     // Handle array indices (numeric parts)
     if (!isNaN(Number(part))) {
       // For array indices, we need to check if the current schema is an array type
-      if (currentSchema?.type === 'array' && currentSchema?.items) {
+      if (currentSchema?.type === "array" && currentSchema?.items) {
         currentSchema = currentSchema.items;
       } else {
         return fieldPath; // Fallback to path if navigation fails
@@ -639,7 +835,8 @@ export interface GroupedAnalysisResult {
   errorField: string;
   errorFieldLabel?: string;
   suggestions: Suggestion[];
-  type: "dependency" | "simple";
+  alternatives?: AlternativeTrigger[]; // Alternative ways to fix by changing trigger field
+  type: "dependency" | "simple";  // "dependency" = forward dependency (has triggerField), "simple" = reverse dependency (no triggerField)
 }
 
 /**
@@ -655,91 +852,55 @@ export function analyzeValidationErrors(
   ffSchema: RJSFSchema,
   schema: Schema
 ): GroupedAnalysisResult[] {
-  const analyzed = new Set();
-  const results = [];
+  const results: AnalysisResult[] = [];
 
   // Analyze each validation error
   for (const error of validationErrors) {
-    const fieldPath = error.fieldPath;
-
-    // Skip if we've already analyzed this field
-    if (analyzed.has(fieldPath)) continue;
-
-    const analysis = analyzeDependencyError(error, formData, schema, ffSchema);
-    // console.log({error, analysis});
-
-    if (analysis) {
-      results.push(analysis);
-      analyzed.add(fieldPath);
-
-      // Also mark related errors as analyzed
-      if (analysis.triggerField) {
-        analyzed.add(analysis.triggerField);
-        const parentPath = getParentPath(fieldPath);
-        if (parentPath) analyzed.add(parentPath);
-      }
-    }
+    const analysisResults = analyzeDependencyError(
+      error,
+      formData,
+      schema,
+      ffSchema
+    );
+    results.push(...analysisResults);
   }
 
-  // Display results grouped by trigger field
-  const grouped: Record<string, AnalysisResult[]> = {};
+  // Deduplicate results by errorField + type (forward dependency vs reverse)
+  // We want one forward dependency result and one reverse result per error field
+  const deduped = new Map<string, AnalysisResult>();
 
   for (const result of results) {
-    const key = result.triggerField || result.errorField;
-    if (!grouped[key]) {
-      grouped[key] = [];
+    // Create a key that uniquely identifies this type of result
+    // For forward dependencies, use triggerField + errorField to identify unique relationships
+    // For reverse dependencies, just use errorField since we only want one set of alternatives per error
+    const key = result.triggerField
+      ? `${result.errorField}|forward` // Only one forward dependency per error field
+      : `${result.errorField}|reverse`;
+
+    // Only keep the first occurrence of each type
+    if (!deduped.has(key)) {
+      deduped.set(key, result);
     }
-    grouped[key].push(result);
   }
 
+  // Convert each AnalysisResult to GroupedAnalysisResult
   const groupedResults: GroupedAnalysisResult[] = [];
 
-  // Display each group and build return array
-  for (const [_, analyses] of Object.entries(grouped)) {
-    const firstAnalysis = analyses[0];
-
-    if (firstAnalysis.triggerField && firstAnalysis.triggerValue !== undefined) {
-      // Collect all unique suggestions
-      const allSuggestions = [];
-      const seenFields = new Set();
-
-      for (const analysis of analyses) {
-        for (const suggestion of analysis.suggestions) {
-          if (!seenFields.has(suggestion.field)) {
-            allSuggestions.push(suggestion);
-            seenFields.add(suggestion.field);
-          }
-        }
-      }
-
-      allSuggestions.forEach((suggestion, index) => {
-        const fieldLabel = suggestion.title || suggestion.field;
-        console.log("fieldLabel", fieldLabel);
-      });
-
-      // Add to return array
-      groupedResults.push({
-        triggerField: firstAnalysis.triggerField,
-        triggerValue: firstAnalysis.triggerValue,
-        triggerFieldLabel: getFieldLabel(firstAnalysis.triggerField!, ffSchema),
-        errorField: firstAnalysis.errorField,
-        errorFieldLabel: getFieldLabel(firstAnalysis.errorField, ffSchema),
-        suggestions: allSuggestions,
-        type: "dependency",
-      });
-    } else {
-      // Add to return array
-      groupedResults.push({
-        errorField: firstAnalysis.errorField,
-        errorFieldLabel: getFieldLabel(firstAnalysis.errorField, ffSchema),
-        suggestions: firstAnalysis.suggestions,
-        type: "simple",
-      });
-    }
+  for (const result of deduped.values()) {
+    groupedResults.push({
+      triggerField: result.triggerField,
+      triggerValue: result.triggerValue,
+      triggerFieldLabel: result.triggerField
+        ? getFieldLabel(result.triggerField, ffSchema)
+        : undefined,
+      errorField: result.errorField,
+      errorFieldLabel: getFieldLabel(result.errorField, ffSchema),
+      suggestions: result.suggestions,
+      type: result.triggerField ? "dependency" : "simple",
+    });
   }
 
   // Console.log the formatted text analysis
-  // console.log("Validation error analysis:", output);
   console.log(groupedResults);
   return groupedResults;
 }
