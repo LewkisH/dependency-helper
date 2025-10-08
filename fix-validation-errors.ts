@@ -156,6 +156,11 @@ function getSchemaForPath(schema: Schema, parentPath: string | null): any {
     const part = parts[i];
     const isNumeric = !isNaN(Number(part));
 
+    // Safety check - if currentSchema is undefined, path is invalid
+    if (!currentSchema) {
+      return null;
+    }
+
     if (isNumeric) {
       // This is an array index - navigate into items if this is an array schema
       if (currentSchema.type === "array" && currentSchema.items) {
@@ -317,7 +322,10 @@ function checkNestedRequiredFields(
                       currentValue: formatValue(itemFieldValue),
                       allowedValues,
                       isRequired: true,
-                      title: getFieldLabel(itemFieldPath, ffSchema as RJSFSchema),
+                      title: getFieldLabel(
+                        itemFieldPath,
+                        ffSchema as RJSFSchema
+                      ),
                     });
                   }
                 }
@@ -477,16 +485,15 @@ function findAllRequiredFields(
           if (propSchema.enum) {
             const isValid = propSchema.enum.includes(propValue);
             if (!isValid || propValue === undefined) {
-              if (fieldExistsInSchema(propPath, ffSchema as RJSFSchema)) {
-                suggestions.push({
-                  field: propPath,
-                  currentValue:
-                    propValue !== undefined ? propValue : "<not set>",
-                  allowedValues: propSchema.enum,
-                  isRequired: topLevelRequired.includes(propName),
-                  title: propSchema.title || propName,
-                });
-              }
+              // Add to suggestions regardless of whether it exists in ffSchema
+              // The filtering will happen later, and missing fields will be tracked
+              suggestions.push({
+                field: propPath,
+                currentValue: propValue !== undefined ? propValue : "<not set>",
+                allowedValues: propSchema.enum,
+                isRequired: topLevelRequired.includes(propName),
+                title: propSchema.title || propName,
+              });
             }
           }
           // Check if this is a nested object (like 'data' or 'financials')
@@ -515,15 +522,15 @@ function findAllRequiredFields(
                 ? ["<a string>"]
                 : ["<value required>"]);
 
-            if (fieldExistsInSchema(propPath, ffSchema as RJSFSchema)) {
-              suggestions.push({
-                field: propPath,
-                currentValue: "<not set>",
-                allowedValues: allowedValues,
-                isRequired: true,
-                title: propSchema.title || propName,
-              });
-            }
+            // Add to suggestions regardless of whether it exists in ffSchema
+            // The filtering will happen later, and missing fields will be tracked
+            suggestions.push({
+              field: propPath,
+              currentValue: "<not set>",
+              allowedValues: allowedValues,
+              isRequired: true,
+              title: propSchema.title || propName,
+            });
           }
         }
 
@@ -965,7 +972,7 @@ function getFieldLabel(
 
   for (let i = 0; i < pathParts.length; i++) {
     const part = pathParts[i];
-    
+
     // Handle array indices (numeric parts)
     if (!isNaN(Number(part))) {
       // For array indices, we need to check if the current schema is an array type
@@ -998,15 +1005,16 @@ function getFieldLabel(
   if (currentSchema?.title) {
     return currentSchema.title;
   }
-  
+
   // If no title, but we're in an array item, use parent array title + field name
   if (parentArrayTitle) {
     const fieldName = pathParts[pathParts.length - 1];
     // Capitalize first letter of field name
-    const capitalizedFieldName = fieldName.charAt(0).toUpperCase() + fieldName.slice(1);
+    const capitalizedFieldName =
+      fieldName.charAt(0).toUpperCase() + fieldName.slice(1);
     return capitalizedFieldName;
   }
-  
+
   // Final fallback to field path
   return fieldPath;
 }
@@ -1148,12 +1156,11 @@ export function analyzeValidationErrors(
     missingFields: Array.from(missingFields),
   }));
 
-  // Console.log the formatted text analysis
+  // Return the formatted analysis output
   const output: ValidationAnalysisOutput = {
     analyses: groupedResults,
     missingInFlattenedSchema: missingFieldsInfo,
   };
 
-  console.log(output);
   return output;
 }
