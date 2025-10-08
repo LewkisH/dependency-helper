@@ -35,11 +35,21 @@ function analyzeValidationErrors(
 - `schema`: The vendor/validation schema (contains dependency rules)
 
 **Returns:**
-Array of grouped analysis results showing the trigger field, current value, and suggested fixes.
+Object containing analysis results and list of fields missing in flattened schema.
 
 ### Output Format
 
 ```typescript
+interface ValidationAnalysisOutput {
+  analyses: GroupedAnalysisResult[];
+  missingInFlattenedSchema: MissingFieldInfo[];
+}
+
+interface MissingFieldInfo {
+  errorField: string;        // The field with the validation error
+  missingFields: string[];   // Fields suggested for this error that don't exist in flattened schema
+}
+
 interface GroupedAnalysisResult {
   triggerField?: string;        // The field that triggered the dependency (only for type="dependency")
   triggerValue?: any;           // Current value of the trigger field (only for type="dependency")
@@ -70,46 +80,94 @@ The system returns **two separate result objects** for bidirectional dependencie
 **2. Reverse Dependency (type="simple"):** Shows alternative trigger values that would make the current error value valid.
 
 ```json
-[
-  {
-    "triggerField": "customer.classSegment",
-    "triggerValue": "Associations",
-    "triggerFieldLabel": "Class Segment (select one)",
-    "errorField": "customer.classSegment",
-    "errorFieldLabel": "Class Segment (select one)",
-    "errorFieldCurrentValue": "Associations",
-    "suggestions": [
-      {
-        "field": "customer.classDescription",
-        "currentValue": "Printing",
-        "allowedValues": [
-          "Clubs - civic, service or social",
-          "Labor Union Offices",
-          "Professional and Trade Associations"
-        ],
-        "isRequired": true,
-        "title": "Class Description (select one)"
-      }
-    ],
-    "type": "dependency"
-  },
-  {
-    "errorField": "customer.classDescription",
-    "errorFieldLabel": "Class Description (select one)",
-    "errorFieldCurrentValue": "Printing",
-    "suggestions": [
-      {
-        "field": "customer.classSegment",
-        "currentValue": "Associations",
-        "allowedValues": ["Business Services"],
-        "isRequired": true,
-        "title": "Class Segment (select one)"
-      }
-    ],
-    "type": "simple"
-  }
-]
+{
+  "analyses": [
+    {
+      "triggerField": "customer.classSegment",
+      "triggerValue": "Associations",
+      "triggerFieldLabel": "Class Segment (select one)",
+      "errorField": "customer.classSegment",
+      "errorFieldLabel": "Class Segment (select one)",
+      "errorFieldCurrentValue": "Associations",
+      "suggestions": [
+        {
+          "field": "customer.classDescription",
+          "currentValue": "Printing",
+          "allowedValues": [
+            "Clubs - civic, service or social",
+            "Labor Union Offices",
+            "Professional and Trade Associations"
+          ],
+          "isRequired": true,
+          "title": "Class Description (select one)"
+        }
+      ],
+      "type": "dependency"
+    },
+    {
+      "errorField": "customer.classDescription",
+      "errorFieldLabel": "Class Description (select one)",
+      "errorFieldCurrentValue": "Printing",
+      "suggestions": [
+        {
+          "field": "customer.classSegment",
+          "currentValue": "Associations",
+          "allowedValues": ["Business Services"],
+          "isRequired": true,
+          "title": "Class Segment (select one)"
+        }
+      ],
+      "type": "simple"
+    }
+  ],
+  "missingInFlattenedSchema": []
+}
 ```
+
+### Understanding `missingInFlattenedSchema`
+
+The `missingInFlattenedSchema` field is a top-level array that groups missing fields by their associated error field. Each entry shows which error field is causing which suggested fields to be flagged as missing from the flattened UI schema.
+
+**Structure:**
+- **`errorField`**: The field with the validation error
+- **`missingFields`**: Array of suggested fields for this error that don't exist in the flattened schema
+
+This helps distinguish between:
+- **UI fields**: Fields that appear in the form interface (exist in flattened schema)
+- **Validation-only fields**: Fields required by validation rules but not rendered in the UI
+
+**Example:**
+```json
+{
+  "analyses": [
+    {
+      "triggerField": "objects.insuredItem.0.products.option.include",
+      "triggerValue": true,
+      "suggestions": [
+        {
+          "field": "objects.insuredItem.0.products.option.financials.insurers",
+          "allowedValues": ["at least 1 items"],
+          "isRequired": true
+        }
+      ],
+      "type": "dependency"
+    }
+  ],
+  "missingInFlattenedSchema": [
+    {
+      "errorField": "objects.insuredItem.0.products.option.include",
+      "missingFields": [
+        "objects.insuredItem.0.products.option.financials.insurers"
+      ]
+    }
+  ]
+}
+```
+
+**Interpretation:** The validation error on `option.include` is suggesting to add the `financials.insurers` field, but that field doesn't exist in the flattened UI schema. This might indicate:
+- The field needs to be added to the UI
+- The field is backend-only and cannot be directly edited by users
+- There's a mismatch between validation schema and UI schema
 
 ### Understanding Result Types: "dependency" vs "simple"
 
@@ -698,3 +756,8 @@ When extending this codebase, consider these areas:
   - This ensures forward dependencies suggest changing dependent fields, not the trigger
 - **Current value filtering**: In reverse dependencies, exclude current trigger value from alternatives
   - It's already invalid, so no point suggesting it again
+- **missingInFlattenedSchema**: Array of `MissingFieldInfo` objects grouping missing fields by error field
+  - Each entry contains `errorField` (the field with validation error) and `missingFields` (array of suggested fields not in flattened schema)
+  - Built by checking each suggestion's field with `fieldExistsInSchema()` and grouping by `result.errorField`
+  - Helps identify which validation errors are suggesting fields that don't exist in the UI
+  - Nested required fields in dependencies are reported even if not in flattened schema (validation schema is source of truth)

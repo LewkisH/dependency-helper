@@ -68,15 +68,18 @@ interface AnalysisResult {
 }
 
 // Helper function to check if a field path exists in the schema
-const fieldExistsInSchema = (fieldPath: string, ffSchema: RJSFSchema): boolean => {
-  const pathParts = fieldPath.split('.');
+const fieldExistsInSchema = (
+  fieldPath: string,
+  ffSchema: RJSFSchema
+): boolean => {
+  const pathParts = fieldPath.split(".");
   let currentSchema: any = ffSchema;
 
   for (const part of pathParts) {
     // Handle array indices (numeric parts)
     if (!isNaN(Number(part))) {
       // For array indices, we need to check if the current schema is an array type
-      if (currentSchema?.type === 'array' && currentSchema?.items) {
+      if (currentSchema?.type === "array" && currentSchema?.items) {
         currentSchema = currentSchema.items;
       } else {
         return false;
@@ -105,7 +108,7 @@ const fieldExistsInSchema = (fieldPath: string, ffSchema: RJSFSchema): boolean =
  * Handles array indices properly
  */
 function getNestedValue(obj: any, pathString: string): any {
-  const keys = pathString.replace(/^\./, '').split('.');
+  const keys = pathString.replace(/^\./, "").split(".");
   return keys.reduce((current: any, key: string) => {
     if (current === null || current === undefined) {
       return undefined;
@@ -116,7 +119,7 @@ function getNestedValue(obj: any, pathString: string): any {
       return Array.isArray(current) ? current[parseInt(key)] : undefined;
     }
 
-    return typeof current === 'object' ? current[key] : undefined;
+    return typeof current === "object" ? current[key] : undefined;
   }, obj);
 }
 
@@ -124,9 +127,9 @@ function getNestedValue(obj: any, pathString: string): any {
  * Parse the schema path to find parent object path
  */
 function getParentPath(fieldPath: string): string | null {
-  const parts = fieldPath.split('.');
+  const parts = fieldPath.split(".");
   if (parts.length <= 1) return null;
-  return parts.slice(0, -1).join('.');
+  return parts.slice(0, -1).join(".");
 }
 
 /**
@@ -146,7 +149,7 @@ function findDependencyField(schemaPath: string): string | null {
 function getSchemaForPath(schema: Schema, parentPath: string | null): any {
   if (!parentPath) return schema.properties;
 
-  const parts = parentPath.split('.');
+  const parts = parentPath.split(".");
   let currentSchema: any = schema.properties;
 
   for (let i = 0; i < parts.length; i++) {
@@ -155,7 +158,7 @@ function getSchemaForPath(schema: Schema, parentPath: string | null): any {
 
     if (isNumeric) {
       // This is an array index - navigate into items if this is an array schema
-      if (currentSchema.type === 'array' && currentSchema.items) {
+      if (currentSchema.type === "array" && currentSchema.items) {
         currentSchema = currentSchema.items;
       }
       // After navigating into items, the next access will need properties
@@ -163,7 +166,7 @@ function getSchemaForPath(schema: Schema, parentPath: string | null): any {
     }
 
     // For non-numeric parts, we need to navigate into properties first if this is an object
-    if (currentSchema.type === 'object' && currentSchema.properties) {
+    if (currentSchema.type === "object" && currentSchema.properties) {
       currentSchema = currentSchema.properties;
     }
 
@@ -187,14 +190,16 @@ function checkNestedRequiredFields(
   propSchema: SchemaProperty,
   propPath: string,
   propValue: any,
-  suggestions: Suggestion[],
+  suggestions: Suggestion[]
 ): void {
   // If this property is an object with required fields
-  if (propSchema.type === 'object' && propSchema.properties) {
+  if (propSchema.type === "object" && propSchema.properties) {
     const nestedRequired = propSchema.required || [];
     const nestedData = propValue || {};
 
-    for (const [nestedFieldName, nestedFieldSchema] of Object.entries(propSchema.properties)) {
+    for (const [nestedFieldName, nestedFieldSchema] of Object.entries(
+      propSchema.properties
+    )) {
       const nestedFieldPath = `${propPath}.${nestedFieldName}`;
       const nestedFieldValue = nestedData[nestedFieldName];
 
@@ -204,89 +209,115 @@ function checkNestedRequiredFields(
       if (nestedFieldSchema.enum) {
         const isValid = nestedFieldSchema.enum.includes(nestedFieldValue);
         if ((!isValid || nestedFieldValue === undefined) && isRequired) {
-          if (fieldExistsInSchema(nestedFieldPath, ffSchema as RJSFSchema)) {
-            suggestions.push({
-              field: nestedFieldPath,
-              currentValue: nestedFieldValue !== undefined ? nestedFieldValue : '<not set>',
-              allowedValues: nestedFieldSchema.enum,
-              isRequired: true,
-              title: nestedFieldSchema.title
-            });
-
-          }
-        }
-      } else if (isRequired && nestedFieldValue === undefined) {
-        let allowedValues: any[] = ['<value required>'];
-        if (nestedFieldSchema.type === 'number') allowedValues = ['<a number>'];
-        else if (nestedFieldSchema.type === 'string') allowedValues = ['<a string>'];
-        else if (nestedFieldSchema.type === 'array') allowedValues = ['<an array>'];
-        if (fieldExistsInSchema(nestedFieldPath, ffSchema as RJSFSchema)) {
+          // For nested required fields within dependencies, report them even if not in ffSchema
+          // The validation schema is the source of truth for what's required
           suggestions.push({
             field: nestedFieldPath,
-            currentValue: '<not set>',
-            allowedValues,
+            currentValue:
+              nestedFieldValue !== undefined ? nestedFieldValue : "<not set>",
+            allowedValues: nestedFieldSchema.enum,
             isRequired: true,
-            title: nestedFieldSchema.title
+            title: nestedFieldSchema.title,
           });
         }
+      } else if (isRequired && nestedFieldValue === undefined) {
+        let allowedValues: any[] = ["<value required>"];
+        if (nestedFieldSchema.type === "number") allowedValues = ["<a number>"];
+        else if (nestedFieldSchema.type === "string")
+          allowedValues = ["<a string>"];
+        else if (nestedFieldSchema.type === "array") {
+          // For arrays, check if there's a minItems constraint
+          const minItems = (nestedFieldSchema as any).minItems;
+          if (minItems) {
+            allowedValues = [`at least ${minItems} items`];
+          } else {
+            allowedValues = ["<an array>"];
+          }
+        }
+        // For nested required fields within dependencies, report them even if not in ffSchema
+        // The validation schema is the source of truth for what's required
+        suggestions.push({
+          field: nestedFieldPath,
+          currentValue: "<not set>",
+          allowedValues,
+          isRequired: true,
+          title: nestedFieldSchema.title,
+        });
       }
 
-      // Check array minItems/maxItems constraints
-      if (nestedFieldSchema.type === 'array' && Array.isArray(nestedFieldValue)) {
+      // Check array minItems/maxItems constraints (for existing arrays)
+      if (
+        nestedFieldSchema.type === "array" &&
+        Array.isArray(nestedFieldValue)
+      ) {
         const minItems = (nestedFieldSchema as any).minItems;
         const maxItems = (nestedFieldSchema as any).maxItems;
 
         if (minItems && nestedFieldValue.length < minItems) {
-          if (fieldExistsInSchema(nestedFieldPath, ffSchema as RJSFSchema)) {
-            suggestions.push({
-              field: nestedFieldPath,
-              currentValue: `array with ${nestedFieldValue.length} items`,
-              allowedValues: [`at least ${minItems} items`],
-              isRequired: true,
-              title: nestedFieldSchema.title
-            });
-          }
+          // For nested required fields within dependencies, report them even if not in ffSchema
+          suggestions.push({
+            field: nestedFieldPath,
+            currentValue: `array with ${nestedFieldValue.length} items`,
+            allowedValues: [`at least ${minItems} items`],
+            isRequired: true,
+            title: nestedFieldSchema.title,
+          });
         }
 
         if (maxItems && nestedFieldValue.length > maxItems) {
-          if (fieldExistsInSchema(nestedFieldPath, ffSchema as RJSFSchema)) {
-            suggestions.push({
-              field: nestedFieldPath,
-              currentValue: `array with ${nestedFieldValue.length} items`,
-              allowedValues: [`at most ${maxItems} items`],
-              isRequired: true,
-              title: nestedFieldSchema.title
-            });
-          }
+          // For nested required fields within dependencies, report them even if not in ffSchema
+          suggestions.push({
+            field: nestedFieldPath,
+            currentValue: `array with ${nestedFieldValue.length} items`,
+            allowedValues: [`at most ${maxItems} items`],
+            isRequired: true,
+            title: nestedFieldSchema.title,
+          });
         }
 
         // Check if array items have required fields
-        if (nestedFieldSchema.items && typeof nestedFieldSchema.items === 'object') {
+        if (
+          nestedFieldSchema.items &&
+          typeof nestedFieldSchema.items === "object"
+        ) {
           const itemSchema = nestedFieldSchema.items;
           const itemRequired = itemSchema.required || [];
 
           // Check each item in the array
           nestedFieldValue.forEach((item: any, index: number) => {
             if (itemSchema.properties) {
-              for (const [itemFieldName, itemFieldSchema] of Object.entries(itemSchema.properties)) {
+              for (const [itemFieldName, itemFieldSchema] of Object.entries(
+                itemSchema.properties
+              )) {
                 const itemFieldPath = `${nestedFieldPath}[${index}].${itemFieldName}`;
                 const itemFieldValue = item?.[itemFieldName];
-                const isItemFieldRequired = itemRequired.includes(itemFieldName);
+                const isItemFieldRequired =
+                  itemRequired.includes(itemFieldName);
 
                 // Check if required field is missing
-                if (isItemFieldRequired && (itemFieldValue === undefined || itemFieldValue === null || itemFieldValue === '')) {
-                  let allowedValues: any[] = ['(value required)'];
-                  if (itemFieldSchema.type === 'number') allowedValues = ['(a number)'];
-                  else if (itemFieldSchema.type === 'string') allowedValues = ['(a string)'];
-                  else if (itemFieldSchema.type === 'boolean') allowedValues = ['true or false'];
+                if (
+                  isItemFieldRequired &&
+                  (itemFieldValue === undefined ||
+                    itemFieldValue === null ||
+                    itemFieldValue === "")
+                ) {
+                  let allowedValues: any[] = ["(value required)"];
+                  if (itemFieldSchema.type === "number")
+                    allowedValues = ["(a number)"];
+                  else if (itemFieldSchema.type === "string")
+                    allowedValues = ["(a string)"];
+                  else if (itemFieldSchema.type === "boolean")
+                    allowedValues = ["true or false"];
 
-                  if (fieldExistsInSchema(itemFieldPath, ffSchema as RJSFSchema)) {
+                  if (
+                    fieldExistsInSchema(itemFieldPath, ffSchema as RJSFSchema)
+                  ) {
                     suggestions.push({
                       field: itemFieldPath,
                       currentValue: formatValue(itemFieldValue),
                       allowedValues,
                       isRequired: true,
-                      title: itemFieldSchema.title
+                      title: itemFieldSchema.title,
                     });
                   }
                 }
@@ -303,7 +334,7 @@ function checkNestedRequiredFields(
  * Find alternative trigger values that would make the current error field value valid
  * This performs "reverse dependency lookup" - given an invalid dependent field value,
  * find what trigger values would make it valid.
- * 
+ *
  * Returns Suggestion[] instead of AlternativeTrigger[] to match the output format.
  */
 function findReverseDependencies(
@@ -321,13 +352,15 @@ function findReverseDependencies(
   }
 
   // Extract the field name from the full path (last part)
-  const errorFieldName = errorFieldPath.split('.').pop();
+  const errorFieldName = errorFieldPath.split(".").pop();
   if (!errorFieldName) return alternatives;
 
   // Iterate through all dependencies to find ones that affect this error field
-  for (const [depFieldName, depRule] of Object.entries(parentSchema.dependencies) as [string, any][]) {
+  for (const [depFieldName, depRule] of Object.entries(
+    parentSchema.dependencies
+  ) as [string, any][]) {
     if (!depRule.oneOf) continue;
-    
+
     // Skip if this is the same field as the error field (no self-referencing)
     if (depFieldName === errorFieldName) continue;
 
@@ -336,11 +369,11 @@ function findReverseDependencies(
 
     for (const branch of depRule.oneOf) {
       const branchProperties = branch.properties || {};
-      
+
       // Check if this branch has the error field
       if (branchProperties[errorFieldName]) {
         const fieldSchema = branchProperties[errorFieldName];
-        
+
         // Check if the current error value would be valid in this branch
         if (fieldSchema.enum && fieldSchema.enum.includes(errorFieldValue)) {
           // This branch would make the value valid! Get the trigger value for this branch
@@ -354,22 +387,26 @@ function findReverseDependencies(
 
     // If we found alternative trigger values, add them to results
     if (validTriggerValues.length > 0) {
-      const triggerFieldPath = parentPath ? `${parentPath}.${depFieldName}` : depFieldName;
-      
+      const triggerFieldPath = parentPath
+        ? `${parentPath}.${depFieldName}`
+        : depFieldName;
+
       // Get the actual current value of the trigger field
       const currentTriggerValue = parentData?.[depFieldName];
-      
+
       // Only add if:
       // 1. The trigger field exists in the schema
       // 2. The current value is NOT already in the valid trigger values (no point suggesting current value)
-      if (fieldExistsInSchema(triggerFieldPath, ffSchema) && 
-          !validTriggerValues.includes(currentTriggerValue)) {
+      if (
+        fieldExistsInSchema(triggerFieldPath, ffSchema) &&
+        !validTriggerValues.includes(currentTriggerValue)
+      ) {
         alternatives.push({
           field: triggerFieldPath,
           currentValue: String(currentTriggerValue),
           allowedValues: validTriggerValues,
           isRequired: true,
-          title: getFieldLabel(triggerFieldPath, ffSchema)
+          title: getFieldLabel(triggerFieldPath, ffSchema),
         });
       }
     }
@@ -382,7 +419,13 @@ function findReverseDependencies(
  * Find all cascading dependencies for a given object and its current values
  * This recursively explores all dependency chains
  */
-function findAllRequiredFields(ffSchema: RJSFSchema, parentSchema: any, parentData: any, parentPath: string | null, visited: Set<string> = new Set()): Suggestion[] {
+function findAllRequiredFields(
+  ffSchema: RJSFSchema,
+  parentSchema: any,
+  parentData: any,
+  parentPath: string | null,
+  visited: Set<string> = new Set()
+): Suggestion[] {
   const suggestions: Suggestion[] = [];
 
   if (!parentSchema) {
@@ -395,14 +438,18 @@ function findAllRequiredFields(ffSchema: RJSFSchema, parentSchema: any, parentDa
   }
 
   // Iterate through all dependencies defined in the schema
-  for (const [depFieldName, depRule] of Object.entries(parentSchema.dependencies) as [string, any][]) {
+  for (const [depFieldName, depRule] of Object.entries(
+    parentSchema.dependencies
+  ) as [string, any][]) {
     const depValue = parentData?.[depFieldName];
 
     // Skip if we don't have a value for this dependency trigger
     if (depValue === undefined) continue;
 
     // Create a unique key to avoid infinite loops
-    const visitKey = `${parentPath || 'root'}.${depFieldName}:${JSON.stringify(depValue)}`;
+    const visitKey = `${parentPath || "root"}.${depFieldName}:${JSON.stringify(
+      depValue
+    )}`;
     if (visited.has(visitKey)) continue;
     visited.add(visitKey);
 
@@ -418,7 +465,9 @@ function findAllRequiredFields(ffSchema: RJSFSchema, parentSchema: any, parentDa
         const topLevelRequired = matchingSchema.required || [];
 
         // Check all properties in the matching schema
-        for (const [propName, propSchema] of Object.entries(matchingSchema.properties || {}) as [string, any][]) {
+        for (const [propName, propSchema] of Object.entries(
+          matchingSchema.properties || {}
+        ) as [string, any][]) {
           if (propName === depFieldName) continue; // Skip the trigger field itself
 
           const propPath = parentPath ? `${parentPath}.${propName}` : propName;
@@ -431,34 +480,48 @@ function findAllRequiredFields(ffSchema: RJSFSchema, parentSchema: any, parentDa
               if (fieldExistsInSchema(propPath, ffSchema as RJSFSchema)) {
                 suggestions.push({
                   field: propPath,
-                  currentValue: propValue !== undefined ? propValue : '<not set>',
+                  currentValue:
+                    propValue !== undefined ? propValue : "<not set>",
                   allowedValues: propSchema.enum,
                   isRequired: topLevelRequired.includes(propName),
-                  title: propSchema.title || propName
+                  title: propSchema.title || propName,
                 });
               }
             }
           }
           // Check if this is a nested object (like 'data' or 'financials')
-          else if (propSchema.type === 'object') {
-            checkNestedRequiredFields(ffSchema, propName, propSchema, propPath, propValue, suggestions);
+          else if (propSchema.type === "object") {
+            checkNestedRequiredFields(
+              ffSchema,
+              propName,
+              propSchema,
+              propPath,
+              propValue,
+              suggestions
+            );
           }
           // Check if property is required but missing (and doesn't have enum or object)
-          else if (topLevelRequired.includes(propName) && propValue === undefined) {
-            const allowedValues = propSchema.enum ||
-              (propSchema.type === 'number' ? ['<a number>'] :
-                propSchema.type === 'array' ? ['<an array>'] :
-                  propSchema.type === 'string' ? ['<a string>'] :
-                    ['<value required>']);
+          else if (
+            topLevelRequired.includes(propName) &&
+            propValue === undefined
+          ) {
+            const allowedValues =
+              propSchema.enum ||
+              (propSchema.type === "number"
+                ? ["<a number>"]
+                : propSchema.type === "array"
+                ? ["<an array>"]
+                : propSchema.type === "string"
+                ? ["<a string>"]
+                : ["<value required>"]);
 
             if (fieldExistsInSchema(propPath, ffSchema as RJSFSchema)) {
               suggestions.push({
                 field: propPath,
-                currentValue: '<not set>',
+                currentValue: "<not set>",
                 allowedValues: allowedValues,
                 isRequired: true,
-                title: propSchema.title || propName
-
+                title: propSchema.title || propName,
               });
             }
           }
@@ -466,8 +529,14 @@ function findAllRequiredFields(ffSchema: RJSFSchema, parentSchema: any, parentDa
 
         // Now recursively check if any of the current values trigger more dependencies
         // For example, if classSegment is set, check if there's a dependency on classSegment
-        for (const [propName, propValue] of Object.entries(parentData || {}) as [string, any][]) {
-          if (propValue !== undefined && parentSchema.dependencies?.[propName] && propName !== depFieldName) {
+        for (const [propName, propValue] of Object.entries(
+          parentData || {}
+        ) as [string, any][]) {
+          if (
+            propValue !== undefined &&
+            parentSchema.dependencies?.[propName] &&
+            propName !== depFieldName
+          ) {
             const nestedSuggestions = findAllRequiredFields(
               ffSchema,
               parentSchema,
@@ -776,7 +845,7 @@ function analyzeDependencyError(
         parentData,
         parentPath
       );
-      console.log("triggerValue", parentPath, dependencyField);
+
       if (allSuggestions.length > 0) {
         const results: AnalysisResult[] = [];
 
@@ -934,6 +1003,16 @@ export interface GroupedAnalysisResult {
   type: "dependency" | "simple"; // "dependency" = forward dependency (has triggerField), "simple" = reverse dependency (no triggerField)
 }
 
+export interface MissingFieldInfo {
+  errorField: string;
+  missingFields: string[];
+}
+
+export interface ValidationAnalysisOutput {
+  analyses: GroupedAnalysisResult[];
+  missingInFlattenedSchema: MissingFieldInfo[];
+}
+
 /**
  * Checks if a schema contains any $ref references
  */
@@ -949,15 +1028,24 @@ function hasRefs(obj: any): boolean {
  * @param validationErrors - Array of mapped validation errors from mapValidationErrors
  * @param formData - The form data object containing manualPayload
  * @param schema - The JSON schema used for validation
- * @returns Array of grouped analysis results
+ * @returns Object containing analysis results and list of fields missing in flattened schema
  */
 export function analyzeValidationErrors(
   validationErrors: MappedError[],
   formData: FormData,
   ffSchema: RJSFSchema,
   schema: Schema
-): GroupedAnalysisResult[] {
+): ValidationAnalysisOutput {
   // Check for $ref references in the schema
+  if (!schema || Object.keys(schema).length === 0) {
+    console.warn(
+      "\n⚠️  SCHEMA ERROR: The provided schema is empty or undefined!"
+    );
+    console.warn("   Please provide a valid JSON schema.");
+    console.warn("   Aborting analysis.\n");
+    return { analyses: [], missingInFlattenedSchema: [] };
+  }
+
   if (hasRefs(schema)) {
     const refCount = (JSON.stringify(schema).match(/"\$ref"\s*:\s*"/g) || [])
       .length;
@@ -968,7 +1056,7 @@ export function analyzeValidationErrors(
     );
     console.warn("   Please dereference the schema before using it.");
     console.warn("   Aborting analysis.\n");
-    return [];
+    return { analyses: [], missingInFlattenedSchema: [] };
   }
 
   const results: AnalysisResult[] = [];
@@ -1004,8 +1092,20 @@ export function analyzeValidationErrors(
 
   // Convert each AnalysisResult to GroupedAnalysisResult
   const groupedResults: GroupedAnalysisResult[] = [];
+  const missingFieldsByError = new Map<string, Set<string>>();
 
   for (const result of Array.from(deduped.values())) {
+    // Check which suggested fields are missing from the flattened schema
+    for (const suggestion of result.suggestions) {
+      if (!fieldExistsInSchema(suggestion.field, ffSchema)) {
+        // Track which error field is causing which missing fields
+        if (!missingFieldsByError.has(result.errorField)) {
+          missingFieldsByError.set(result.errorField, new Set());
+        }
+        missingFieldsByError.get(result.errorField)!.add(suggestion.field);
+      }
+    }
+
     groupedResults.push({
       triggerField: result.triggerField,
       triggerValue: result.triggerValue,
@@ -1020,7 +1120,20 @@ export function analyzeValidationErrors(
     });
   }
 
+  // Convert the map to the MissingFieldInfo array
+  const missingFieldsInfo: MissingFieldInfo[] = Array.from(
+    missingFieldsByError.entries()
+  ).map(([errorField, missingFields]) => ({
+    errorField,
+    missingFields: Array.from(missingFields),
+  }));
+
   // Console.log the formatted text analysis
-  console.log(groupedResults);
-  return groupedResults;
+  const output: ValidationAnalysisOutput = {
+    analyses: groupedResults,
+    missingInFlattenedSchema: missingFieldsInfo,
+  };
+
+  console.log(output);
+  return output;
 }
