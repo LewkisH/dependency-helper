@@ -289,7 +289,7 @@ function checkNestedRequiredFields(
               for (const [itemFieldName, itemFieldSchema] of Object.entries(
                 itemSchema.properties
               )) {
-                const itemFieldPath = `${nestedFieldPath}[${index}].${itemFieldName}`;
+                const itemFieldPath = `${nestedFieldPath}.${index}.${itemFieldName}`;
                 const itemFieldValue = item?.[itemFieldName];
                 const isItemFieldRequired =
                   itemRequired.includes(itemFieldName);
@@ -317,7 +317,7 @@ function checkNestedRequiredFields(
                       currentValue: formatValue(itemFieldValue),
                       allowedValues,
                       isRequired: true,
-                      title: itemFieldSchema.title,
+                      title: getFieldLabel(itemFieldPath, ffSchema as RJSFSchema),
                     });
                   }
                 }
@@ -961,12 +961,19 @@ function getFieldLabel(
 
   const pathParts = fieldPath.split(".");
   let currentSchema: any = ffSchema;
+  let parentArrayTitle: string | undefined = undefined;
 
-  for (const part of pathParts) {
+  for (let i = 0; i < pathParts.length; i++) {
+    const part = pathParts[i];
+    
     // Handle array indices (numeric parts)
     if (!isNaN(Number(part))) {
       // For array indices, we need to check if the current schema is an array type
       if (currentSchema?.type === "array" && currentSchema?.items) {
+        // Remember the array's title for potential fallback
+        if (currentSchema.title) {
+          parentArrayTitle = currentSchema.title;
+        }
         currentSchema = currentSchema.items;
       } else {
         return fieldPath; // Fallback to path if navigation fails
@@ -987,8 +994,21 @@ function getFieldLabel(
     }
   }
 
-  // Return the title if it exists, otherwise fallback to the field path
-  return currentSchema?.title || fieldPath;
+  // Return the title if it exists
+  if (currentSchema?.title) {
+    return currentSchema.title;
+  }
+  
+  // If no title, but we're in an array item, use parent array title + field name
+  if (parentArrayTitle) {
+    const fieldName = pathParts[pathParts.length - 1];
+    // Capitalize first letter of field name
+    const capitalizedFieldName = fieldName.charAt(0).toUpperCase() + fieldName.slice(1);
+    return capitalizedFieldName;
+  }
+  
+  // Final fallback to field path
+  return fieldPath;
 }
 
 export interface GroupedAnalysisResult {
